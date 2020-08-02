@@ -1,0 +1,459 @@
+type: edu
+files:
+- name: tests.py
+  visible: false
+  text: |
+    from hstest.exceptions import WrongAnswerException
+    from hstest.test_case import CheckResult
+    from hstest.stage_test import StageTest
+    from hstest.test_case import TestCase
+    from shutil import copy2
+    import os
+    import sqlite3
+    import random
+    import re
+
+    card_number = ''
+    pin = ''
+    are_all_inputs_read = False
+    db_file_name = 'card.s3db'
+    temp_db_file_name = 'temp.s3db'
+
+
+    def get_credentials(output: str):
+        number = re.findall(r'400000\d{10}', output, re.MULTILINE)
+        if not number:
+            raise WrongAnswerException('You are printing the card number incorrectly. '
+                                       'The card number should look like in the example: 400000DDDDDDDDDD, where D is a digit.')
+
+        PIN = re.findall(r'^\d{4}$', output, re.MULTILINE)
+        if not PIN:
+            raise WrongAnswerException('You are printing the card PIN incorrectly. '
+                                       'The PIN should look like in the example: DDDD, where D is a digit.')
+
+        return number[0], PIN[0]
+
+
+    def test_card_generation(output: str, value_to_return):
+        global card_number, pin, are_all_inputs_read
+        are_all_inputs_read = False
+        credentials = get_credentials(output)
+        card_number = credentials[0]
+        pin = credentials[1]
+        return value_to_return
+
+
+    def test_difference_between_generations(output: str, value_to_return):
+        global card_number, pin, are_all_inputs_read
+        credentials = get_credentials(output)
+        another_card_number = credentials[0]
+
+        if another_card_number == card_number:
+            return CheckResult.wrong('Your program generates two identical card numbers!')
+        are_all_inputs_read = True
+
+        return value_to_return
+
+
+    def test_sign_in_with_correct_credentials(output: str, value_to_return):
+        global card_number, pin
+        return '{}\n{}'.format(card_number, pin)
+
+
+    def test_output_after_correct_sign_in(output: str, value_to_return):
+        global are_all_inputs_read
+        are_all_inputs_read = True
+        if 'successfully' not in output.lower():
+            return CheckResult.wrong(
+                'There is no \'successfully\' in your output after signing in with correct credentials')
+        return value_to_return
+
+
+    def test_sign_in_with_wrong_pin(output: str, value_to_return):
+        global card_number, pin
+        wrong_pin = pin
+        while pin == wrong_pin:
+            wrong_pin = ''.join(list(map(str, random.sample(range(1, 10), 4))))
+        return '{}\n{}\n'.format(card_number, wrong_pin)
+
+
+    def test_output_after_wrong_pin(output: str, value_to_return):
+        global are_all_inputs_read
+        are_all_inputs_read = True
+        if 'wrong' not in output.lower():
+            return CheckResult.wrong(
+                'There is no \'wrong\' in your output after signing in with incorrect credentials')
+        return value_to_return
+
+
+    def test_sign_in_with_wrong_card_number(output: str, value_to_return):
+        global card_number, pin
+        wrong_card_number = card_number
+        while wrong_card_number == card_number:
+            temp = [4, 0, 0, 0, 0, 0]
+            for _ in range(10):
+                temp.append(random.randint(1, 9))
+            wrong_card_number = ''.join(list(map(str, temp)))
+        return '{}\n{}\n'.format(wrong_card_number, pin)
+
+
+    def test_output_after_wrong_card_number(output: str, value_to_return):
+        global are_all_inputs_read
+        are_all_inputs_read = True
+        if 'wrong' not in output.lower():
+            return CheckResult.wrong(
+                'There is no \'wrong\' in your output after signing in with incorrect credentials')
+        return value_to_return
+
+
+    def is_passed_luhn_algorithm(number):
+        luhn = [int(char) for char in str(number)]
+        for i, num in enumerate(luhn):
+            if (i + 1) % 2 == 0:
+                continue
+            temp = num * 2
+            luhn[i] = temp if temp < 10 else temp - 9
+        return sum(luhn) % 10 == 0
+
+
+    def test_luhn_algorithm(output: str, correct_num_of_cards):
+        global are_all_inputs_read
+
+        numbers = re.findall(r'400000\d{10,}', output, re.MULTILINE)
+
+        if len(numbers) != correct_num_of_cards:
+            return CheckResult.wrong(
+                f'After creating {correct_num_of_cards} cards, found {len(numbers)} cards with correct format\n'
+                f'The card number should be 16-digit length and should start with 400000.')
+
+        for number in numbers:
+            if len(number) != 16:
+                return CheckResult.wrong(f'Wrong card number \'{number}\'. The card number should be 16-digit length.')
+            if not is_passed_luhn_algorithm(number):
+                return CheckResult.wrong('The card number \'{}\' doesn\'t pass luhn algorithm!'.format(number))
+
+        are_all_inputs_read = True
+        return '0'
+
+
+    def check_db(output: str, value_to_return):
+        if not os.path.exists(db_file_name):
+            return CheckResult.wrong('Can\'t find db file named \'{}\''.format(db_file_name))
+        try:
+            copy2(db_file_name, temp_db_file_name)
+        except Exception:
+            return CheckResult.wrong('Can\'t copy database file!')
+
+        try:
+            with sqlite3.connect(db_file_name) as db:
+                response = db.execute(
+                    'SELECT name FROM sqlite_master WHERE type = \'table\' AND name NOT LIKE \'sqlite_%\';')
+                for _ in response.fetchall():
+                    if 'card' in _:
+                        break
+                else:
+                    return CheckResult.wrong('Your database doesn\'t have a table named \'card\'')
+        except Exception as exp:
+            return CheckResult.wrong('Can\'t connect to the database!')
+
+        correct_columns = (('ID', 'INTEGER'), ('NUMBER', 'TEXT'), ('PIN', 'TEXT'), ('BALANCE', 'INTEGER'))
+
+        try:
+            with sqlite3.connect(db_file_name) as db:
+                response = db.execute('PRAGMA table_info(card);')
+                real_columns = response.fetchall()
+                for correct_column in correct_columns:
+                    for real_column in real_columns:
+                        real_column = [str(element).upper() for element in real_column]
+                        if correct_column[0] in real_column and correct_column[1] in real_column:
+                            break
+                    else:
+                        return CheckResult.wrong('Your table should have columns described in the stage instructions.')
+        except Exception:
+            return CheckResult.wrong('Can\'t connect to the database!')
+
+        return CheckResult.correct()
+
+
+    def check_db_rows(output, attach):
+        correct_num_of_cards = 10
+        numbers = re.findall(r'400000\d{10,}', output, re.MULTILINE)
+
+        if len(numbers) != correct_num_of_cards:
+            return CheckResult.wrong(
+                f'After creating {correct_num_of_cards} cards, found {len(numbers)} cards with correct format\n'
+                f'The card number should be 16-digit length and should start with 400000.')
+
+        with sqlite3.connect(db_file_name) as db:
+            rows = db.execute('SELECT * FROM card').fetchall()
+            for number in numbers:
+                if len(number) != 16:
+                    return CheckResult.wrong(f'Wrong card number \'{number}\'. The card number should be 16-digit length.')
+                for row in rows:
+                    if number in row:
+                        break
+                else:
+                    return CheckResult.wrong('Your database doesn’t save newly created cards.\n'
+                                             'Make sure you commit your DB changes right after saving a new card in the database!')
+        return CheckResult.correct()
+
+
+    class BankingSystem(StageTest):
+
+        def generate(self):
+            return [
+                TestCase(
+                    stdin='0',
+                    check_function=check_db,
+                ),
+                TestCase(
+                    stdin=[
+                        '1',
+                        lambda output: test_card_generation(output, '1'),
+                        lambda output: test_difference_between_generations(output, '0')
+                    ]),
+                TestCase(
+                    stdin=[
+                        '1\n1\n1\n1\n1\n1\n1\n1',
+                        lambda output: test_luhn_algorithm(output, 8),
+                    ]),
+                TestCase(
+                    stdin='1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n0',
+                    check_function=check_db_rows
+                ),
+                TestCase(
+                    stdin=[
+                        '1',
+                        lambda output: test_card_generation(output, '2'),
+                        lambda output: test_sign_in_with_correct_credentials(output, None),
+                        lambda output: test_output_after_correct_sign_in(output, '0')
+                    ]),
+                TestCase(
+                    stdin=[
+                        '1',
+                        lambda output: test_card_generation(output, '2'),
+                        lambda output: test_sign_in_with_wrong_pin(output, None),
+                        lambda output: test_output_after_wrong_pin(output, '0')
+                    ]),
+                TestCase(
+                    stdin=[
+                        '1',
+                        lambda output: test_card_generation(output, '2'),
+                        lambda output: test_sign_in_with_wrong_card_number(output, None),
+                        lambda output: test_output_after_wrong_card_number(output, '0')
+                    ])
+            ]
+
+        def check(self, reply: str, attach) -> CheckResult:
+            if are_all_inputs_read:
+                return CheckResult.correct()
+            else:
+                return CheckResult.wrong('You didn\'t read all inputs!')
+
+        def after_all_tests(self):
+            if os.path.exists('temp.s3db'):
+                copy2('temp.s3db', 'card.s3db')
+                os.remove('temp.s3db')
+
+
+    if __name__ == '__main__':
+        BankingSystem('banking.banking').run_tests()
+  learner_created: false
+- name: banking/banking.py
+  visible: true
+  text: |
+    import random
+
+
+    class ChooseActionState:
+        name = "choose_action"
+
+        def __init__(self, bank):
+            self.bank = bank
+
+        def get_input(self):
+            print()
+            print("1. Create an account", "2. Log into account", "0. Exit", sep="\n")
+            return input()
+
+        def interpret_input(self, action):
+            self.bank.choose_action(action)
+
+
+    class LoggedInChooseActionState:
+        name = "logged_in_choose_action"
+
+        def __init__(self, bank):
+            self.bank = bank
+
+        def get_input(self):
+            print()
+            print("1. Balance", "2. Log out", "0. Exit", sep="\n")
+            return input()
+
+        def interpret_input(self, action):
+            self.bank.logged_in_choose_action(action)
+
+
+    class CreateAccountState:
+        name = "create_account"
+
+        def __init__(self, bank):
+            self.bank = bank
+
+        def get_input(self):
+            pass
+
+        def interpret_input(self, no_input):
+            self.bank.create_account()
+
+
+    class LoginState:
+        name = "login"
+
+        def __init__(self, bank):
+            self.bank = bank
+
+        def get_input(self):
+            print()
+            print("Enter your card number:")
+            card = input()
+            print("Enter your PIN:")
+            pin = input()
+            return card, pin
+
+        def interpret_input(self, credentials):
+            self.bank.login(credentials)
+
+
+    class BalanceState:
+        name = "balance"
+
+        def __init__(self, bank):
+            self.bank = bank
+
+        def get_input(self):
+            pass
+
+        def interpret_input(self, no_input):
+            self.bank.balance()
+
+
+    class LogoutState:
+        name = "logout"
+
+        def __init__(self, bank):
+            self.bank = bank
+
+        def get_input(self):
+            pass
+
+        def interpret_input(self, no_input):
+            self.bank.logout()
+
+
+    class BankAccount:
+        leading_zero = "0"
+        balance = 0
+
+        def __init__(self):
+            iin = "400000"
+            customer_account_number = str(random.randint(0, 999999999)).rjust(9, self.leading_zero)
+            checksum = self.generate_checksum(iin, customer_account_number)
+            self.card_number = iin + customer_account_number + checksum
+            self.pin = str(random.randint(0, 9999)).rjust(4, self.leading_zero)
+
+        def generate_checksum(self, iin, customer_account_number):
+            digits = [int(digit) for digit in iin + customer_account_number]
+            total_sum = 0
+            for index, digit in enumerate(digits):
+                total_sum += self.modify_digit(digit) if (index + 1) % 2 == 1 else digit
+            return str((10 - (total_sum % 10)) % 10)
+
+        def modify_digit(self, digit):
+            modified_digit = digit * 2
+            if modified_digit > 9:
+                modified_digit = modified_digit - 9
+            return modified_digit
+
+
+    class Bank:
+        accounts = {}
+        logged_account = None
+
+        def __init__(self):
+            choose_action_state = ChooseActionState(self)
+            logged_in_choose_action_state = LoggedInChooseActionState(self)
+            create_account_state = CreateAccountState(self)
+            login_state = LoginState(self)
+            logout_state = LogoutState(self)
+            balance_state = BalanceState(self)
+            self.current_state = choose_action_state
+            self.available_states = {
+                i.name: i for i in [choose_action_state, logged_in_choose_action_state, create_account_state, login_state,
+                                    logout_state, balance_state]
+            }
+
+        def start(self):
+            user_input = self.current_state.get_input()
+            while user_input != "0":
+                self.current_state.interpret_input(user_input)
+                user_input = self.current_state.get_input()
+            print()
+            print("Bye!")
+
+        def choose_action(self, action):
+            if action == "1":
+                self.current_state = self.available_states["create_account"]
+            elif action == "2":
+                self.current_state = self.available_states["login"]
+
+        def logged_in_choose_action(self, action):
+            if action == "1":
+                self.current_state = self.available_states["balance"]
+            elif action == "2":
+                self.current_state = self.available_states["logout"]
+
+        def create_account(self):
+            account = BankAccount()
+            self.accounts[account.card_number] = account
+            print()
+            print("Your card has been created")
+            print("Your card number:", account.card_number, sep="\n")
+            print("Your card PIN:", account.pin, sep="\n")
+            self.current_state = self.available_states["choose_action"]
+
+        def login(self, credentials):
+            user_account = self.accounts.get(credentials[0])
+            if user_account and user_account.pin == credentials[1]:
+                self.logged_account = user_account
+                print("You have successfully logged in!")
+                self.current_state = self.available_states["logged_in_choose_action"]
+            else:
+                print()
+                print("Wrong card number or PIN!")
+                self.current_state = self.available_states["choose_action"]
+
+        def balance(self):
+            print()
+            print("Balance:", self.logged_account.balance)
+            self.current_state = self.available_states["logged_in_choose_action"]
+
+        def logout(self):
+            print()
+            print("You have successfully logged out!")
+            self.current_state = self.available_states["choose_action"]
+
+
+    Bank().start()
+  learner_created: true
+- name: card.s3db
+  visible: true
+  learner_created: true
+feedback_link: https://hyperskill.org/projects/109/stages/593/implement
+status: Solved
+feedback:
+  message: Congratulations! Continue on <a href="https://hyperskill.org/projects/109/stages/593/implement">JetBrains
+    Academy</a>
+  time: Sun, 02 Aug 2020 05:59:20 UTC
+record: 3

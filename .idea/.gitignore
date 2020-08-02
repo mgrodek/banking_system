@@ -1,0 +1,18 @@
+/.idea/
+/venv/
+/course-info.yaml
+/course-remote-info.yaml
+/requirements.txt
+/test_helper.py
+/VirtualEnvironment/
+/workspace.xml
+/vcs.xml
+/sqldialects.xml
+/inspectionProfiles/profiles_settings.xml
+/modules.xml
+/misc.xml
+/dataSources.xml
+/dataSources.local.xml
+/Simple Banking System.iml
+/frameworkLessonHistory/storage.storageData
+/frameworkLessonHistory/storage.storageRecordIndex
